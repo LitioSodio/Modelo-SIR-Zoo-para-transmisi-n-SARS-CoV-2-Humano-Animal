@@ -1,0 +1,1 @@
+# Modelo-SIR-Zoo-para-transmisi-n-SARS-CoV-2-Humano-Animal
