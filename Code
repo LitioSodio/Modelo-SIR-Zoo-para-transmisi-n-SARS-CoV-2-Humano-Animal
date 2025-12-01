@@ -1,0 +1,212 @@
+import numpy as np
+import pandas as pd
+from scipy.integrate import odeint
+import matplotlib.pyplot as plt
+from scipy.optimize import minimize
+
+#Datos
+df = pd.read_csv("sars_ani_data.csv")
+columna_animal = 'host_com_orig '
+
+# Filtrar perros en estados unidos
+df_dogs_usa = df[(df[columna_animal] == 'dog') & (df['country_name'] == 'United States')].copy()
+
+print(f"Total registros: {len(df)}")
+print(f"Perros en USA: {len(df_dogs_usa)}")
+
+# Procesar fechas
+df_dogs_usa['date_confirmed'] = pd.to_datetime(df_dogs_usa['date_confirmed'], errors='coerce')
+df_dogs_usa = df_dogs_usa.dropna(subset=['date_confirmed'])
+df_dogs_usa = df_dogs_usa.sort_values('date_confirmed')
+
+# Crear serie temporal (casos acumulados por fecha)
+df_dogs_usa['casos_acumulados'] = range(1, len(df_dogs_usa) + 1)
+
+
+
+# 2. DEFINIR EL MODELO SIR
+
+def modelo_sir_zoo(y, t, beta, gamma, alpha, Ih):
+    S, I, R = y
+    dSdt = -beta * S * Ih  # Animales que se infectan
+    dIdt = beta * S * Ih - gamma * I - alpha * I  # Nuevos infectados - recuperados - muertos
+    dRdt = gamma * I  # Animales recuperados
+    return [dSdt, dIdt, dRdt]
+
+
+# 3. PARÁMETROS INICIALES
+# Población total de animales susceptibles
+N_animales = 5000  # Podemos ajustar este valor
+# Condiciones iniciales: 1 animal infectado, 0 recuperados
+I0 = 1
+R0 = 0
+S0 = N_animales - I0
+estado_inicial = [S0, I0, R0]
+# Humanos infectados (simplificación: constante)
+Ih = 20
+# Parámetros iniciales (estimados)
+beta = 0.0001  # Bajo: los animales no se infectan fácilmente
+gamma = 0.07  # Recuperación en ~14 días (1/14 ≈ 0.07)
+alpha = 0.02  # Baja mortalidad
+
+# Período de tiempo a simular (días)
+t_dias = np.linspace(0, 150, 150)
+
+print("\nModelo simulado")
+solucion = odeint(modelo_sir_zoo, estado_inicial, t_dias, args=(beta, gamma, alpha, Ih))
+S, I, R = solucion.T  # Separar las variables
+
+print(f"Parámetros:")
+print(f"  beta = {beta} (transmisión)")
+print(f"  gamma = {gamma} (recuperación)")
+print(f"  alpha = {alpha} (mortalidad)")
+print(f"  Humanos infectados (Ih) = {Ih}")
+
+# 4 Gráficos
+
+plt.figure(figsize=(12, 10))
+
+# Gráfico 1: Curvas del modelo
+plt.subplot(2, 2, 1)
+plt.plot(t_dias, S, 'b-', linewidth=2, label='Susceptibles')
+plt.plot(t_dias, I, 'r-', linewidth=2, label='Infectados')
+plt.plot(t_dias, R, 'g-', linewidth=2, label='Recuperados')
+plt.xlabel('Días')
+plt.ylabel('Número de animales')
+plt.title('Modelo SIR-Zoo: Dinámica de la infección')
+plt.legend()
+plt.grid(alpha=0.3)
+plt.ylim(0, N_animales * 1.1)
+
+# Gráfico 2: Solo infectados
+plt.subplot(2, 2, 2)
+plt.plot(t_dias, I, 'r-', linewidth=2)
+plt.xlabel('Días')
+plt.ylabel('Animales infectados')
+plt.title('Curva de infectados')
+plt.grid(alpha=0.3)
+
+# Gráfico 3: Datos reales
+plt.subplot(2, 2, 3)
+if len(df_dogs_usa) > 1:
+    # Convertir fechas a días desde el inicio
+    fecha_inicio = df_dogs_usa['date_confirmed'].min()
+    df_dogs_usa['dias_desde_inicio'] = (df_dogs_usa['date_confirmed'] - fecha_inicio).dt.days
+
+    plt.scatter(df_dogs_usa['dias_desde_inicio'],
+                df_dogs_usa['casos_acumulados'],
+                color='red', s=50, alpha=0.7,
+                label='Datos reales (perros en USA)')
+
+    plt.xlabel('Días desde primer caso')
+    plt.ylabel('Casos acumulados')
+    plt.title('Datos reales vs Modelo')
+    plt.grid(alpha=0.3)
+    plt.legend()
+else:
+    plt.text(0.5, 0.5, 'No hay suficientes datos\npara comparar',
+             ha='center', va='center', transform=plt.gca().transAxes)
+    plt.title('Datos insuficientes')
+
+# Gráfico 4: Explicación de parámetros
+plt.subplot(2, 2, 4)
+plt.axis('off')
+texto = """
+PARÁMETROS DEL MODELO:
+
+β (beta) = Tasa de transmisión
+  • Humano → Animal
+  • Valor: {:.6f}
+  • Si β es alto: contagio rápido
+
+γ (gamma) = Tasa de recuperación
+  • 1/γ = tiempo medio de infección
+  • Valor: {:.4f}
+  • 1/{:.2f} ≈ {:.0f} días
+
+α (alpha) = Tasa de mortalidad
+  • Animales que mueren o aíslan
+  • Valor: {:.4f}
+
+Supuestos:
+• Humanos infectados: constante
+• No hay transmisión animal→animal
+• Población animal cerrada
+""".format(beta, gamma, 1 / gamma, 1 / gamma, alpha)
+plt.text(0.05, 0.95, texto, transform=plt.gca().transAxes,
+         fontsize=9, verticalalignment='top',
+         bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+
+plt.suptitle('Modelo SIR-Zoo: Transmisión SARS-CoV-2 Humano→Animal', fontsize=14)
+plt.tight_layout()
+plt.show()
+
+
+# 6. AJUSTE DE PARÁMETROS
+
+if len(df_dogs_usa) > 5:
+    print("\n AJUSTANDO PARÁMETROS A DATOS REALES")
+
+    # Preparar datos para ajuste
+    t_observado = df_dogs_usa['dias_desde_inicio'].values
+    I_observado = df_dogs_usa['casos_acumulados'].values
+
+
+    # Función de error (diferencia entre modelo y datos)
+    def calcular_error(parametros):
+        beta_aj, gamma_aj, alpha_aj = parametros
+        sol_aj = odeint(modelo_sir_zoo, estado_inicial, t_observado,
+                        args=(beta_aj, gamma_aj, alpha_aj, Ih))
+        I_modelo = sol_aj[:, 1]  # Infectados según modelo
+        error = np.sum((I_modelo - I_observado) ** 2)  # Error cuadrático
+        return error
+
+
+    # Intentar ajustar (con límites razonables)
+    try:
+        parametros_iniciales = [0.0001, 0.05, 0.01]
+        limites = [(0, 0.001), (0.01, 0.2), (0, 0.1)]
+
+        resultado = minimize(calcular_error, parametros_iniciales,
+                             bounds=limites, method='L-BFGS-B')
+
+        if resultado.success:
+            beta_ajustado, gamma_ajustado, alpha_ajustado = resultado.x
+
+            print("\nAjuste exitoso!")
+            print(f"Parámetros ajustados:")
+            print(f"  beta  = {beta_ajustado:.8f}")
+            print(f"  gamma = {gamma_ajustado:.6f}")
+            print(f"  alpha = {alpha_ajustado:.6f}")
+
+            # Comparar modelo ajustado con datos
+            solucion_ajustada = odeint(modelo_sir_zoo, estado_inicial, t_dias,
+                                       args=(beta_ajustado, gamma_ajustado, alpha_ajustado, Ih))
+            I_ajustado = solucion_ajustada[:, 1]
+
+            plt.figure(figsize=(10, 6))
+            plt.plot(t_dias, I_ajustado, 'b-', linewidth=2,
+                     label=f'Modelo ajustado (β={beta_ajustado:.2e})')
+            plt.scatter(t_observado, I_observado, color='red', s=50,
+                        alpha=0.7, label='Datos reales')
+            plt.xlabel('Días')
+            plt.ylabel('Casos acumulados')
+            plt.title('Ajuste del modelo SIR-Zoo a datos reales')
+            plt.legend()
+            plt.grid(alpha=0.3)
+            plt.show()
+        else:
+            print("El ajuste no convergió. Usando parámetros iniciales.")
+
+    except Exception as e:
+        print(f"Error en ajuste: {e}")
+        print("Continuando con parámetros iniciales.")
+
+
+
+# Análisis rápido de otras especies
+print("\n=== DISTRIBUCIÓN POR ESPECIE ===")
+especies_comunes = df[columna_animal].value_counts().head(10)
+print("Especies más comunes en el dataset:")
+for especie, conteo in especies_comunes.items():
+    print(f"  {especie.strip()}: {conteo} registros")
